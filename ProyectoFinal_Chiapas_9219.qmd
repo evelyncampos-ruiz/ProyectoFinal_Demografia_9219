@@ -1,0 +1,960 @@
+---
+title: "Trabajo Final 9219: Estado de Chiapas"
+author:
+  - "Campos Ruiz Evelyn Paola"
+date: today
+format:
+  pdf:
+    toc: false
+    geometry: margin=2.5cm
+    fontsize: 11pt
+    keep-tex: false
+    pdf-engine: xelatex
+editor: visual
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+rm(list = ls())
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(openxlsx)
+library(ggplot2)
+library(kableExtra)
+library(scales)
+library(stringr)
+library(knitr)
+library(lubridate)
+
+# Crear carpetas si no existen
+for (d in c("data/raw","data/clean","output/tablas","output/figuras","referencias"))
+  dir.create(d, showWarnings = FALSE, recursive = TRUE)
+
+colores_sexo <- c("Hombres" = "#2166ac", "Mujeres" = "#d6604d")
+tipos_anio   <- c("2010" = "solid", "2019" = "dashed", "2021" = "dotdash")
+```
+
+## Introducción
+
+Chiapas es uno de los 32 estados que conforman los Estados Unidos Mexicanos, ubicado en el sureste del país. Con una extensión territorial de 73,289 $km^2$ divididos en 124 municipios, limita al norte con Tabasco, al este con Guatemala, al sur con el Océano Pacífico y al oeste con Oaxaca y Veracruz. Es la octava entidad más extensa y se caracteriza por su notable diversidad cultural; alberga una de las poblaciones indígenas más numerosas del país —principalmente tzotzil, tzeltal, chol y zoque—, lo que confiere dinámicas demográficas particulares.
+
+En este documento analizamos el impacto de la pandemia de COVID-19 a través de las tablas de vida de los años 2010, 2019 y 2021, el efecto de los homicidios sobre la mortalidad mediante la tabla de causa eliminada, y los indicadores sintéticos de fecundidad para 2010 y 2019. Los datos poblacionales provienen del Censo de Población y Vivienda 2010 y 2020 (INEGI), y las defunciones del INEGI. La comparación internacional de fecundidad se realiza con México y Chile (UNDESA, WPP2024).
+
+Algunos de los aspectos de contexto que considero muy relevantes de mencionar serían los siguientes:
+
+**1. Pobreza y rezago social.** Chiapas ocupa el último lugar nacional en el Índice de Desarrollo Humano. El acceso limitado a servicios de salud en zonas serranas e indígenas se refleja en tasas de mortalidad infantil superiores a la media nacional.
+
+**2. Alta fecundidad histórica.** En 2010 Chiapas registraba la TGF más alta del país ($\approx$ 2.75 hijos por mujer). La pirámide de base ancha refleja una transición demográfica aún en curso.
+
+**3. Sobremortalidad masculina en adultos jóvenes.** Hay un exceso de mortalidad en el grupo 15–34 años relacionado con causas externas, visible en la curva $\log(nM_x)$.
+
+**4. Impacto del COVID-19 en 2021.** Las defunciones totales aumentaron de forma pronunciada respecto a 2019, concentradas en adultos de 50–74 años y en hombres.
+
+## Metodología
+
+Para la creación de las tablas de vida supremos como base el siguiente diagrama de flujo en el que se muestra el proceso necesario de tratamiento de los datos.
+
+```{r diagrama, echo=FALSE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE}
+pasos <- data.frame(
+  x = rep(0.5, 7), y = 7:1,
+  label = c(
+    "1. Obtener defunciones (INEGI)\npor edad quinquenal, sexo y año de ocurrencia",
+    "2. Obtener población censal prorateada (INEGI)\nCensos 2010 y 2020, Chiapas",
+    "3. Estimar población media 2019 y 2021\nmediante crecimiento exponencial intercensal",
+    "4. Calcular tasa central de mortalidad\nnMx = nDx / nKx",
+    "5. Calcular nax, nqx, npx, lx, ndx, nLx, Tx, ex\n(fórmulas de tabla de vida abreviada)",
+    "6. Construir cuadro de e0 por sexo y año",
+    "7. Graficar nMx, lx, nqx, ndx, ex, nLx y analizar"
+  )
+)
+flechas <- data.frame(
+  x=rep(0.5,6), xend=rep(0.5,6),
+  y=c(6.62,5.62,4.62,3.62,2.62,1.62),
+  yend=c(6.38,5.38,4.38,3.38,2.38,1.38)
+)
+ggplot() +
+  geom_segment(data=flechas, aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(0.25,"cm"),type="closed"),
+               color="#444444", linewidth=0.6) +
+  geom_label(data=pasos, aes(x=x,y=y,label=label),
+             size=2.7, fill="#e8f4f8", color="#1a1a1a",
+             label.size=0.4, label.padding=unit(0.35,"lines")) +
+  scale_x_continuous(limits=c(0,1)) +
+  scale_y_continuous(limits=c(0.5,7.5)) +
+  theme_void() + theme(plot.margin=margin(5,5,5,5))
+```
+
+## Expresiones matemáticas a considerar
+
+Para esta parte asumimos que las tasas específicas por edad son iguales a las tasas por período:
+
+$$_nm_x = _nM_x = \frac{_nD_x}{_nK_x}$$
+
+Para edades de 0 a 1 (Coale-Demeny):
+
+$$a_0 = \begin{cases}
+0.330 & \text{Hombres, } m_0 \geq 0.107 \\
+0.350 & \text{Mujeres, } m_0 \geq 0.107 \\
+0.045 + 2.684\,m_0 & \text{Hombres, } m_0 < 0.107 \\
+0.053 + 2.800\,m_0 & \text{Mujeres, } m_0 < 0.107
+\end{cases}$$
+
+Para edades de 1 a 4 (Coale-Demeny):
+
+$$_4a_1 = \begin{cases}
+1.352 & \text{Hombres, } m_0 \geq 0.107 \\
+1.361 & \text{Mujeres, } m_0 \geq 0.107 \\
+1.651 - 2.816\,m_0 & \text{Hombres, } m_0 < 0.107 \\
+1.522 - 1.518\,m_0 & \text{Mujeres, } m_0 < 0.107
+\end{cases}$$
+
+En cualquier otro caso: $_na_x = n/2$. Para el grupo abierto 85+: $a_{85} = 1/m_{85}$.
+
+Probabilidades de muerte y supervivencia:
+
+$$_nq_x = \frac{n \cdot _nm_x}{1+(n-_na_x)\cdot_nm_x}, \qquad _np_x = 1 - _nq_x$$
+
+Sobrevivientes y defunciones de la tabla ($l_0 = 100\,000$):
+
+$$l_{x+n} = l_x \cdot _np_x, \qquad _nd_x = l_x \cdot _nq_x$$
+
+Años-persona vividos:
+
+$$_nL_x = n \cdot l_{x+n} + _na_x \cdot _nd_x, \qquad L_{85+} = \frac{l_{85}}{m_{85+}}$$
+
+Total de años-persona y esperanza de vida:
+
+$$T_x = \sum_{i=x}^{85+} {}_nL_i, \qquad e_x = \frac{T_x}{l_x}$$
+
+Crecimiento exponencial intercensal:
+
+$$K(t) = K(t_0)\,e^{r(t-t_0)}, \qquad r = \frac{\ln K(t_T) - \ln K(t_0)}{t_T - t_0}$$
+
+**Tabla de causa eliminada.** Mediante la aproximación proporcional de decrementos múltiples:
+
+$$_nq_x^{(-i)} = _nq_x \cdot \left(1 - \frac{_nD_x^i}{_nD_x}\right)$$
+
+**Medidas sintéticas de fecundidad:**
+
+$$\text{TEF}_x = \frac{B_x}{M_x} \times 1000, \qquad \text{TGF} = 5 \sum_{x=15}^{45} \frac{\text{TEF}_x}{1000}$$
+
+$$\text{TBR} = \text{TGF} \times K, \quad K = \frac{100}{205} \approx 0.4878$$
+
+$$\text{TNR} = 5K \sum_{x=15}^{45} \frac{\text{TEF}_x}{1000} \cdot \frac{_nL_x^F}{5\,l_0}$$
+
+## Funciones en R
+
+```{r funciones, echo=TRUE}
+# ── Crecimiento exponencial ────────────────────────────────────────────
+expo <- function(K_0, K_T, t_0, t_T, t) {
+  dt <- decimal_date(as.Date(t_T)) - decimal_date(as.Date(t_0))
+  r  <- log(K_T / K_0) / dt
+  K_0 * exp(r * (t - decimal_date(as.Date(t_0))))
+}
+
+# ── Preparar y agrupar población ──────────────────────────────────────
+agrupar_poblacion <- function(pob_vector, edades_grupo) {
+  # pob_vector: población por grupos quinquenales ya agrupada
+  # edades_grupo: vector de etiquetas
+  data.frame(edad = edades_grupo, pob = pob_vector)
+}
+
+# ── Tabla de vida abreviada ────────────────────────────────────────────
+construir_tabla_vida <- function(edades, def, pob, sexo, anio) {
+  n_g <- length(edades)
+  n   <- c(1, 4, rep(5, n_g - 3), Inf)
+  nMx <- def / pob
+  nax <- c(NA, NA, rep(2.5, n_g - 3), NA)
+
+  m0 <- nMx[1]
+  # a0 Coale-Demeny
+  nax[1] <- if (sexo == "Hombres")
+    ifelse(m0 >= 0.107, 0.330, 0.045 + 2.684 * m0)
+  else
+    ifelse(m0 >= 0.107, 0.350, 0.053 + 2.800 * m0)
+
+  # 4a1 Coale-Demeny
+  nax[2] <- if (sexo == "Hombres")
+    ifelse(m0 >= 0.107, 1.352, 1.651 - 2.816 * m0)
+  else
+    ifelse(m0 >= 0.107, 1.361, 1.522 - 1.518 * m0)
+
+  # ax grupo abierto
+  nax[n_g] <- 1 / nMx[n_g]
+
+  # Probabilidades
+  nqx      <- (n * nMx) / (1 + (n - nax) * nMx)
+  nqx[n_g] <- 1.0
+  npx <- 1 - nqx
+
+  # Sobrevivientes (radix = 100 000)
+  lx <- numeric(n_g); lx[1] <- 100000
+  for (i in 2:n_g) lx[i] <- lx[i-1] * npx[i-1]
+
+  ndx <- lx * nqx
+
+  # Años-persona vividos
+  nLx <- numeric(n_g)
+  for (i in 1:(n_g-1)) nLx[i] <- n[i] * lx[i+1] + nax[i] * ndx[i]
+  nLx[n_g] <- lx[n_g] / nMx[n_g]
+
+  Tx  <- rev(cumsum(rev(nLx)))
+  ex  <- Tx / lx
+
+  data.frame(
+    x   = edades,
+    n   = ifelse(is.infinite(n), NA, n),
+    nMx = round(nMx, 6),
+    nax = round(nax, 4),
+    nqx = round(nqx, 6),
+    npx = round(npx, 6),
+    lx  = round(lx, 2),
+    ndx = round(ndx, 2),
+    nLx = round(nLx, 2),
+    Tx  = round(Tx, 2),
+    ex  = round(ex, 4),
+    Sexo = sexo,
+    Anio = anio
+  )
+}
+
+# ── Aqui calculamo la esperanza de vida al nacer ──────────────────────────────
+calcular_e0 <- function(tv) tv$ex[1]
+
+# ── Y tendriamos nuestra tablita de causa eliminada ──────────────────────────────────────────
+tabla_causa_eliminada <- function(def_total, def_causa, qx_base,
+                                   nax_base, nMx_base, lx_base, sexo) {
+  n_g <- length(def_total)
+  n_w <- c(1, 4, rep(5, n_g - 3), Inf)
+  prop_otros <- ifelse(def_total > 0, 1 - def_causa/def_total, 1)
+  nqx_i      <- qx_base * prop_otros; nqx_i[n_g] <- 1
+  npx_i      <- 1 - nqx_i
+  lx_i       <- numeric(n_g); lx_i[1] <- 100000
+  for (j in 2:n_g) lx_i[j] <- lx_i[j-1] * npx_i[j-1]
+  ndx_i <- lx_i * nqx_i
+  nLx_i <- numeric(n_g)
+  for (j in 1:(n_g-1))
+    nLx_i[j] <- n_w[j] * lx_i[j+1] + nax_base[j] * ndx_i[j]
+  nLx_i[n_g] <- lx_i[n_g] / nMx_base[n_g]
+  Tx_i <- rev(cumsum(rev(nLx_i)))
+  ex_i <- Tx_i / lx_i
+  data.frame(
+    nqx   = round(qx_base, 6),
+    nqx_i = round(nqx_i, 6),
+    lx    = round(lx_base, 2),
+    lx_i  = round(lx_i, 2),
+    ex_i  = round(ex_i, 4),
+    Sexo  = sexo
+  )
+}
+
+# ── Calcular TEF ──────────────────────────────────────────────────────
+calcular_tef <- function(nacimientos, poblacion_femenina) {
+  (nacimientos / poblacion_femenina) * 1000
+}
+
+# ── Calcular TGF, TBR, TNR ───────────────────────────────────────────
+calcular_indicadores <- function(tef, nLx_F, K = 100/205, l0 = 100000, n = 5) {
+  nfx <- tef / 1000
+  tgf <- n * sum(nfx)
+  tbr <- tgf * K
+  tnr <- n * K * sum(nfx * (nLx_F / (n * l0)))
+  c(TGF = tgf, TBR = tbr, TNR = tnr)
+}
+
+# ── Ya por últimograficamos las tasas de mortalidad ─────────────────────────────────────
+graficar_mx <- function(tv_df, titulo = "Tasas de mortalidad — Chiapas") {
+  ggplot(tv_df, aes(x = factor(x, levels = unique(x)), y = nMx,
+                    color = Sexo, linetype = Anio,
+                    group = interaction(Sexo, Anio))) +
+    geom_line(linewidth = 0.8) + geom_point(size = 1.2) +
+    scale_y_log10(labels = scales::label_scientific()) +
+    scale_color_manual(values = colores_sexo) +
+    scale_linetype_manual(values = tipos_anio) +
+    labs(title = titulo, x = "Edad", y = expression(nM[x]),
+         color = "Sexo", linetype = "Año",
+         caption = "Fuente: INEGI / cálculos propios.") +
+    theme_minimal(base_size = 10) +
+    theme(legend.position = "bottom",
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+}
+
+# ── Graficar esperanza de vida ────────────────────────────────────────
+graficar_ex <- function(tv_df, titulo = "Esperanza de vida — Chiapas") {
+  ggplot(tv_df, aes(x = factor(x, levels = unique(x)), y = ex,
+                    color = Sexo, linetype = Anio,
+                    group = interaction(Sexo, Anio))) +
+    geom_line(linewidth = 0.8) +
+    scale_color_manual(values = colores_sexo) +
+    scale_linetype_manual(values = tipos_anio) +
+    labs(title = titulo, x = "Edad", y = expression(e[x]~"(años)"),
+         color = "Sexo", linetype = "Año",
+         caption = "Fuente: INEGI / cálculos propios.") +
+    theme_minimal(base_size = 10) +
+    theme(legend.position = "bottom",
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+}
+
+# ── Exportar tabla CSV ────────────────────────────────────────────────
+exportar_csv <- function(df, ruta) {
+  write.csv(df, ruta, row.names = FALSE)
+  invisible(df)
+}
+```
+
+## Datos de entrada
+
+```{r datos-entrada, echo=TRUE}
+# ── Grupos de edad ────────────────────────────────────────────────────
+edades_x <- c(0,1,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85)
+etiquetas_x <- c("0","1","5","10","15","20","25","30","35",
+                  "40","45","50","55","60","65","70","75","80","85+")
+
+# ── Defunciones Chiapas (INEGI, año de ocurrencia, residencia habitual)
+# Fuente: INEGI_exporta_10_3_2026_10_52_30.xlsx, hoja Mortalidad
+def_H_2010 <- c(751,237,112,137,285,407,429,520,479,497,
+                 558,634,726,727,894,997,1057,990,1567)
+def_M_2010 <- c(575,227,112,108,165,180,173,205,223,298,
+                 442,463,602,613,818,946,984,899,1579)
+def_H_2019 <- c(784,239,122,132,272,433,503,510,548,636,
+                 688,784,1029,1101,1219,1257,1482,1414,2200)
+def_M_2019 <- c(674,229, 87, 93,137,153,184,221,298,374,
+                 538,671, 934,1048,1072,1191,1448,1324,2252)
+def_H_2021 <- c(730,233, 72,131,304,454,549,588,736,876,
+                 1132,1261,1605,1765,2042,2100,2307,2251,3182)
+def_M_2021 <- c(607,218, 79, 90,144,180,237,279,406,543,
+                  733, 939,1333,1622,1691,1628,1981,1922,2898)
+
+# ── Población Chiapas — Censos 2010 y 2020 (INEGI) ────────────────────
+# Fuente: INEGI_exporta_10_3_2026_10_52_30.xlsx, hoja "2010 y 2020"
+pob_H_2010 <- c(1022789.5,4394602.1,5678012.8,5620705.6,5592851.4,
+                 4876620.4,4261390.8,4079076.0,4016975.4,3394464.2,
+                 2861576.4,2434104.5,1894169.1,1496122.8,1109703.8,
+                 885407.0,587326.7,359958.0,302675.0)
+pob_M_2010 <- c(985824.0,4260281.0,5511360.7,5459685.2,5574772.1,
+                 5142515.0,4639443.1,4500291.2,4382317.7,3704611.2,
+                 3143145.9,2695091.8,2051134.7,1660283.4,1237257.2,
+                 1012533.6,674111.1,449201.2,409609.7)
+pob_H_2020 <- c(921180.8,4170581.5,5465198.5,5566592.2,5474277.6,
+                 5177353.8,4872197.8,4537778.9,4341147.3,4071323.6,
+                 3820808.6,3339561.4,2698955.2,2262875.1,1710639.7,
+                 1236230.7,849780.6,524975.0,434931.5)
+pob_M_2020 <- c(898747.4,4081722.4,5322602.1,5400760.2,5355924.9,
+                 5267407.8,5142528.3,4903524.3,4698733.9,4450742.8,
+                 4138866.9,3713262.2,3009378.9,2568660.1,1942355.8,
+                 1416859.8,968743.2,652939.9,606873.0)
+
+# ── Interpolar 2019 y 2021 con crecimiento exponencial ───────────────
+t0 <- "2010-06-25"   # fecha del Censo 2010
+tT <- "2020-03-15"   # fecha del Censo 2020
+pob_H_2019 <- mapply(expo, pob_H_2010, pob_H_2020,
+                     t_0=t0, t_T=tT, t=2019.5)
+pob_M_2019 <- mapply(expo, pob_M_2010, pob_M_2020,
+                     t_0=t0, t_T=tT, t=2019.5)
+pob_H_2021 <- mapply(expo, pob_H_2010, pob_H_2020,
+                     t_0=t0, t_T=tT, t=2021.5)
+pob_M_2021 <- mapply(expo, pob_M_2010, pob_M_2020,
+                     t_0=t0, t_T=tT, t=2021.5)
+```
+
+## Pirámides poblacionales
+
+```{r piramides, echo=FALSE, message=FALSE, warning=FALSE}
+# Datos CONAPO — si hay error de red, se usan los datos del Excel ya cargados
+pop_pir <- tryCatch({
+  fread("https://repodatos.atdt.gob.mx/CONAPO/proyecciones/00_Pob_Mitad_1950_2070.csv",
+        showProgress = FALSE)
+}, error = function(e) NULL)
+
+if (!is.null(pop_pir)) {
+  chiapas_p <- pop_pir[ENTIDAD == "Chiapas"]
+  for (yr in c("2026","2070")) {
+    df <- chiapas_p[ANIO == yr] |>
+      mutate(POB = ifelse(SEXO == "Hombres", -POBLACION, POBLACION))
+    p <- ggplot(df, aes(x = EDAD, y = POB, fill = SEXO)) +
+      geom_bar(stat = "identity", position = "identity") +
+      coord_flip() +
+      scale_y_continuous(labels = \(x) format(abs(x), big.mark = ","),
+                         name = "Población") +
+      scale_fill_manual(values = c("Hombres"="#2166ac","Mujeres"="#d6604d")) +
+      labs(title = paste0("Pirámide Poblacional — Chiapas (", yr, ")"),
+           x = "Edad", fill = "Sexo", caption = "Fuente: CONAPO.") +
+      theme_minimal(base_size = 9) +
+      theme(legend.position = "bottom",
+            plot.title = element_text(hjust=0.5, size=9, face="bold"))
+    print(p)
+  }
+} else {
+  message("No se pudo descargar CONAPO. Omitiendo pirámides por red.")
+}
+```
+
+La pirámide de 2026 muestra una estructura expansiva con base ancha, reflejo de la fecundidad históricamente alta de Chiapas. Para el año 2070 la estructura se rectangulariza, esto quiere decir que la base se estrecha, la población adulta gana peso y los adultos mayores son más numerosos, señal del avance de la transición demográfica.
+
+## Tablas de vida
+
+```{r calcular-tv, echo=FALSE}
+tv_H_2010 <- construir_tabla_vida(edades_x,def_H_2010,pob_H_2010,"Hombres","2010")
+tv_M_2010 <- construir_tabla_vida(edades_x,def_M_2010,pob_M_2010,"Mujeres","2010")
+tv_H_2019 <- construir_tabla_vida(edades_x,def_H_2019,pob_H_2019,"Hombres","2019")
+tv_M_2019 <- construir_tabla_vida(edades_x,def_M_2019,pob_M_2019,"Mujeres","2019")
+tv_H_2021 <- construir_tabla_vida(edades_x,def_H_2021,pob_H_2021,"Hombres","2021")
+tv_M_2021 <- construir_tabla_vida(edades_x,def_M_2021,pob_M_2021,"Mujeres","2021")
+
+tv_todas <- bind_rows(tv_H_2010,tv_M_2010,tv_H_2019,tv_M_2019,tv_H_2021,tv_M_2021) |>
+  mutate(Anio = factor(Anio, levels=c("2010","2019","2021")))
+
+# Exportar
+exportar_csv(tv_todas, "data/clean/tablas_vida_chiapas.csv")
+```
+
+```{r tablas-vida-imprimir, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+combos <- list(
+  list(tv_H_2010,"Hombres","2010"), list(tv_M_2010,"Mujeres","2010"),
+  list(tv_H_2019,"Hombres","2019"), list(tv_M_2019,"Mujeres","2019"),
+  list(tv_H_2021,"Hombres","2021"), list(tv_M_2021,"Mujeres","2021")
+)
+for (obj in combos) {
+  tv  <- obj[[1]]
+  cap <- paste0("Tabla de vida — ",obj[[2]]," ",obj[[3]]," — Chiapas")
+  print(
+    kable(tv |> select(x, n, nMx, nax, nqx, npx, lx, ndx, nLx, Tx, ex),
+          caption = cap, booktabs = TRUE, digits = 4,
+          col.names = c("x","n","$nM_x$","$na_x$","$nq_x$",
+                        "$np_x$","$l_x$","$nd_x$","$nL_x$","$T_x$","$e_x$"),
+          escape = FALSE) |>
+      kable_styling(latex_options = c("scale_down","hold_position"),
+                    font_size = 7)
+  )
+  cat("\\newpage\n")
+}
+```
+
+## Otros resultados
+
+### Esperanza de vida al nacer
+
+```{r e0-tabla, echo=FALSE}
+e0_tab <- tv_todas |>
+  filter(x == 0) |>
+  select(Anio, Sexo, ex) |>
+  pivot_wider(names_from = Sexo, values_from = ex) |>
+  arrange(Anio) |>
+  mutate(Brecha = round(Mujeres - Hombres, 2))
+
+# Exportar
+exportar_csv(e0_tab, "output/tablas/tabla_esperanza_vida.csv")
+
+kable(e0_tab,
+      caption = "Chiapas: Esperanza de vida al nacer ($e_0$) por sexo y año",
+      col.names = c("Año","Hombres","Mujeres","Brecha (M−H)"),
+      booktabs = TRUE, align = "cccc") |>
+  kable_styling(latex_options = "hold_position", full_width = FALSE)
+```
+
+### Tasas de mortalidad por edad
+
+```{r graf-mx, echo=FALSE, fig.height=3.5, fig.width=8, fig.cap="Tasas de mortalidad por edad en escala logarítmica — Chiapas 2010, 2019 y 2021. Fuente: INEGI / cálculos propios."}
+p_mx <- graficar_mx(tv_todas, "Tasas de mortalidad por edad — Chiapas (escala log)")
+ggsave("output/figuras/mx_chiapas_2010_2019_2021.png", p_mx,
+       width=8, height=3.5, dpi=150)
+print(p_mx)
+```
+
+### Esperanza de vida por edad
+
+```{r graf-ex, echo=FALSE, fig.height=3.5, fig.width=8, fig.cap="Esperanza de vida por edad — Chiapas 2010, 2019 y 2021. Fuente: INEGI / cálculos propios."}
+p_ex <- graficar_ex(tv_todas, "Esperanza de vida por edad — Chiapas")
+ggsave("output/figuras/ex_chiapas_2010_2019_2021.png", p_ex,
+       width=8, height=3.5, dpi=150)
+print(p_ex)
+```
+
+### Defunciones de la tabla de vida
+
+```{r graf-dx, echo=FALSE, fig.height=3.5, fig.width=8, fig.cap="Defunciones de la tabla de vida — Chiapas 2010, 2019 y 2021. Fuente: INEGI / cálculos propios."}
+p_dx <- ggplot(tv_todas,
+       aes(x = factor(x, levels=edades_x), y = ndx,
+           color = Sexo, linetype = Anio,
+           group = interaction(Sexo, Anio))) +
+  geom_line(linewidth = 0.8) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_color_manual(values = colores_sexo) +
+  scale_linetype_manual(values = tipos_anio) +
+  labs(title = "Defunciones de la tabla de vida — Chiapas",
+       x = "Edad", y = expression(nd[x]),
+       color = "Sexo", linetype = "Año",
+       caption = "Fuente: INEGI / cálculos propios.") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle=45, hjust=1, size=7))
+ggsave("output/figuras/dx_chiapas.png", p_dx, width=8, height=3.5, dpi=150)
+print(p_dx)
+```
+
+\newpage
+
+## Exclusión de homicidios (causa eliminada)
+
+Tomando los datos de defunciones por homicidio en Chiapas para 2019, calculamos cómo cambian la probabilidad de muerte y la esperanza de vida al eliminar esta causa.
+
+```{r causa-eliminada, echo=FALSE}
+# ── 1. Leer homicidios de INEGI ───────────────────────────────────────────────
+leer_homicidios_inegi <- function(path, anio_obj = 2019) {
+  raw <- readxl::read_excel(path, sheet = 1, skip = 5, col_names = FALSE)
+  names(raw)[1:6] <- c("edad","anio","total","hombre","mujer","no_especificado")
+  hom <- raw |>
+    dplyr::filter(!is.na(edad), !is.na(anio)) |>
+    dplyr::mutate(
+      edad   = as.character(edad),
+      anio   = as.integer(anio),
+      hombre = as.numeric(gsub(",","", as.character(hombre))),
+      mujer  = as.numeric(gsub(",","", as.character(mujer))),
+      x = dplyr::case_when(
+        edad == "Menores de 1 año"          ~ 0,
+        edad == "1-4 años"                  ~ 1,
+        stringr::str_detect(edad,"^5-9")    ~ 5,
+        stringr::str_detect(edad,"^10-14")  ~ 10,
+        stringr::str_detect(edad,"^15-19")  ~ 15,
+        stringr::str_detect(edad,"^20-24")  ~ 20,
+        stringr::str_detect(edad,"^25-29")  ~ 25,
+        stringr::str_detect(edad,"^30-34")  ~ 30,
+        stringr::str_detect(edad,"^35-39")  ~ 35,
+        stringr::str_detect(edad,"^40-44")  ~ 40,
+        stringr::str_detect(edad,"^45-49")  ~ 45,
+        stringr::str_detect(edad,"^50-54")  ~ 50,
+        stringr::str_detect(edad,"^55-59")  ~ 55,
+        stringr::str_detect(edad,"^60-64")  ~ 60,
+        stringr::str_detect(edad,"^65-69")  ~ 65,
+        stringr::str_detect(edad,"^70-74")  ~ 70,
+        stringr::str_detect(edad,"^75-79")  ~ 75,
+        stringr::str_detect(edad,"^80-84")  ~ 80,
+        stringr::str_detect(edad,"^85")     ~ 85,
+        TRUE ~ NA_real_)) |>
+    dplyr::filter(anio == anio_obj, !is.na(x)) |>
+    dplyr::arrange(x)
+  hom$hombre[is.na(hom$hombre)] <- 0
+  hom$mujer[is.na(hom$mujer)]   <- 0
+  if (nrow(hom) != 19)
+    stop(paste0("ERROR: se esperaban 19 grupos, se obtuvieron ", nrow(hom)))
+  return(hom)
+}
+
+hom_inegi <- leer_homicidios_inegi(
+  "data/raw/INEGI_exporta_4_6_2026_23_18_55.xlsx", anio_obj = 2019)
+
+hom_H_2019 <- hom_inegi$hombre
+hom_M_2019 <- hom_inegi$mujer
+
+# Verificación
+if (any(hom_H_2019 > def_H_2019, na.rm = TRUE) ||
+    any(hom_M_2019 > def_M_2019, na.rm = TRUE))
+  stop("ERROR: homicidios > defunciones totales por edad. Revisar datos.")
+
+# ── 2. Causa eliminada ────────────────────────────────────────────────────────
+ce_H <- tabla_causa_eliminada(
+  def_H_2019, hom_H_2019, tv_H_2019$nqx,
+  tv_H_2019$nax, tv_H_2019$nMx, tv_H_2019$lx, "Hombres")
+ce_M <- tabla_causa_eliminada(
+  def_M_2019, hom_M_2019, tv_M_2019$nqx,
+  tv_M_2019$nax, tv_M_2019$nMx, tv_M_2019$lx, "Mujeres")
+ce_H$x <- edades_x
+ce_M$x <- edades_x
+
+# — 3. Exportar CSV de causa eliminada ———
+
+exportar_csv(dplyr::bind_rows(ce_H, ce_M), "data/clean/causa_eliminada_chiapas.csv")
+
+
+# — 4. Crear LT_CausaEliminada_Chiapas.xlsx ———
+
+crear_excel_causa_eliminada <- function(tv_H, tv_M, def_H, def_M, hom_H, hom_M,
+                                        output = "output/tablas/LT_CausaEliminada_Chiapas.xlsx") {
+  
+  dir.create("output/tablas", recursive = TRUE, showWarnings = FALSE)
+  
+  wb <- openxlsx::createWorkbook()
+  
+  openxlsx::addWorksheet(wb, "Introduction")
+  openxlsx::addWorksheet(wb, "LT")
+  openxlsx::addWorksheet(wb, "Homicidios")
+  openxlsx::addWorksheet(wb, "Defunciones generales")
+  openxlsx::addWorksheet(wb, "Decrementos Multiples")
+  openxlsx::addWorksheet(wb, "Resumen")
+  
+  intro <- data.frame(
+    Campo = c("Entidad", "Año", "Causa eliminada", "Fuente", "Descripción"),
+    Valor = c(
+      "Chiapas",
+      "2019",
+      "Homicidios",
+      "INEGI / cálculos propios",
+      "Tabla de vida con causa eliminada para estimar el efecto de los homicidios sobre la esperanza de vida."
+    )
+  )
+  
+  openxlsx::writeData(wb, "Introduction", intro)
+  
+  tv_H$Sexo <- "Hombres"
+  tv_M$Sexo <- "Mujeres"
+  tv_H$Anio <- 2019
+  tv_M$Anio <- 2019
+  
+  lt_base <- dplyr::bind_rows(tv_H, tv_M)
+  openxlsx::writeData(wb, "LT", lt_base)
+  
+  homicidios <- data.frame(
+    x = tv_H$x,
+    Hombres = hom_H,
+    Mujeres = hom_M
+  )
+  
+  openxlsx::writeData(wb, "Homicidios", homicidios)
+  
+  defunciones <- data.frame(
+    x = tv_H$x,
+    Hombres = def_H,
+    Mujeres = def_M
+  )
+  
+  openxlsx::writeData(wb, "Defunciones generales", defunciones)
+  
+  dec_H <- data.frame(
+    Sexo = "Hombres",
+    x = tv_H$x,
+    nDx = def_H,
+    nDxi = hom_H,
+    nqx = tv_H$nqx,
+    nqx_sin_homicidios = tv_H$nqx * (1 - hom_H / def_H),
+    npx_sin_homicidios = 1 - (tv_H$nqx * (1 - hom_H / def_H)),
+    lx = tv_H$lx,
+    ex = tv_H$ex
+  )
+  
+  dec_M <- data.frame(
+    Sexo = "Mujeres",
+    x = tv_M$x,
+    nDx = def_M,
+    nDxi = hom_M,
+    nqx = tv_M$nqx,
+    nqx_sin_homicidios = tv_M$nqx * (1 - hom_M / def_M),
+    npx_sin_homicidios = 1 - (tv_M$nqx * (1 - hom_M / def_M)),
+    lx = tv_M$lx,
+    ex = tv_M$ex
+  )
+  
+  dec <- dplyr::bind_rows(dec_H, dec_M)
+  dec[is.na(dec)] <- 0
+  
+  openxlsx::writeData(wb, "Decrementos Multiples", dec)
+  
+  resumen <- data.frame(
+    Sexo = c("Hombres", "Mujeres"),
+    e0_con_homicidios = c(tv_H$ex[1], tv_M$ex[1]),
+    Homicidios_2019 = c(sum(hom_H, na.rm = TRUE), sum(hom_M, na.rm = TRUE))
+  )
+  
+  openxlsx::writeData(wb, "Resumen", resumen)
+  
+  openxlsx::saveWorkbook(wb, output, overwrite = TRUE)
+  
+  message("Excel guardado correctamente en: ", output)
+}
+
+
+crear_excel_causa_eliminada(
+  tv_H = tv_H_2019,
+  tv_M = tv_M_2019,
+  def_H = def_H_2019,
+  def_M = def_M_2019,
+  hom_H = hom_H_2019,
+  hom_M = hom_M_2019,
+  output = "output/tablas/LT_CausaEliminada_Chiapas.xlsx"
+)
+```
+
+```{r graf-ce, echo=FALSE, fig.height=3.5, fig.width=9, fig.cap="Probabilidad de muerte con y sin homicidios — Chiapas 2019. Fuente: INEGI / cálculos propios."}
+ce_graf <- bind_rows(
+  ce_H |> pivot_longer(c(nqx, nqx_i), names_to="tipo", values_to="val") |>
+    mutate(Sexo="Hombres"),
+  ce_M |> pivot_longer(c(nqx, nqx_i), names_to="tipo", values_to="val") |>
+    mutate(Sexo="Mujeres")
+) |>
+  mutate(tipo = recode(tipo,
+    nqx   = "Con homicidios",
+    nqx_i = "Sin homicidios"),
+    x_f = factor(x, levels=edades_x))
+
+p_ce <- ggplot(ce_graf, aes(x=x_f, y=val, color=tipo, group=tipo)) +
+  geom_line(linewidth=0.9) + geom_point(size=1.5) +
+  facet_wrap(~Sexo) +
+  scale_y_log10() +
+  scale_color_manual(values=c("Con homicidios"="#d6604d",
+                               "Sin homicidios"="#4575b4"), name=NULL) +
+  labs(title = "Probabilidad de muerte con y sin homicidios — Chiapas 2019",
+       x="Edad", y=expression(nq[x]~"(escala log)"),
+       caption="Fuente: INEGI / cálculos propios.") +
+  theme_minimal(base_size=10) +
+  theme(legend.position="bottom",
+        axis.text.x=element_text(angle=45,hjust=1,size=7))
+ggsave("output/figuras/causa_eliminada_chiapas_2019.png", p_ce,
+       width=9, height=3.5, dpi=150)
+print(p_ce)
+```
+
+```{r tabla-ce-e0, echo=FALSE}
+res_ce <- data.frame(
+  Sexo               = c("Hombres","Mujeres"),
+  e0_con_homicidios  = c(tv_H_2019$ex[1], tv_M_2019$ex[1]),
+  e0_sin_homicidios  = c(ce_H$ex_i[1],    ce_M$ex_i[1]),
+  ganancia_anios     = round(c(ce_H$ex_i[1]-tv_H_2019$ex[1],
+                                ce_M$ex_i[1]-tv_M_2019$ex[1]), 3),
+  ganancia_meses     = round(c((ce_H$ex_i[1]-tv_H_2019$ex[1])*12,
+                                (ce_M$ex_i[1]-tv_M_2019$ex[1])*12), 1)
+)
+kable(res_ce,
+      caption = "Chiapas 2019: esperanza de vida con y sin homicidios",
+      col.names = c("Sexo","Con homicidios","Sin homicidios",
+                    "Ganancia (años)","Ganancia (meses)"),
+      booktabs = TRUE, digits = 3, align = "ccccc") |>
+  kable_styling(latex_options="hold_position", full_width=FALSE) |>
+  footnote(general="Cálculo por decrementos múltiples (prop. aproximada). Fuente: INEGI.",
+           general_title="Nota:")
+```
+
+```{r graf-e0-ce, echo=FALSE, fig.height=3, fig.width=5, fig.cap="Comparación de esperanza de vida al nacer con y sin homicidios — Chiapas 2019."}
+e0_bar <- data.frame(
+  Sexo   = rep(c("Hombres","Mujeres"), 2),
+  Tipo   = c(rep("Con homicidios",2), rep("Sin homicidios",2)),
+  e0     = c(tv_H_2019$ex[1], tv_M_2019$ex[1],
+              ce_H$ex_i[1], ce_M$ex_i[1])
+)
+p_e0_ce <- ggplot(e0_bar, aes(x=Sexo, y=e0, fill=Tipo)) +
+  geom_col(position="dodge", width=0.6) +
+  geom_text(aes(label=round(e0,2)), position=position_dodge(0.6),
+            vjust=-0.3, size=3.2) +
+  scale_fill_manual(values=c("Con homicidios"="#d6604d",
+                               "Sin homicidios"="#4575b4"), name=NULL) +
+  labs(title="Esperanza de vida al nacer — Chiapas 2019",
+       y="años", x=NULL,
+       caption="Fuente: INEGI / cálculos propios.") +
+  theme_minimal(base_size=10) +
+  theme(legend.position="bottom")
+ggsave("output/figuras/e0_causa_eliminada_chiapas_2019.png", p_e0_ce,
+       width=5, height=3, dpi=150)
+print(p_e0_ce)
+```
+
+\newpage
+
+## Medidas sintéticas de la fecundidad
+
+### Nivel de reemplazo
+
+La Tasa Neta de Reproducción (NRR) se define como:
+
+$$\text{NRR} = \sum_{x=\alpha}^{\beta} {}_nf_x^F \cdot \frac{{}_nL_x^F}{l_0^F} = p(A) \cdot \text{GRR}$$
+
+donde $p(A)$ es la sobrevivencia femenina promedio hasta las edades reproductivas y $\text{GRR} = n\sum_x {}_nf_x^F$. La TGF se relaciona con la GRR a través de la razón de masculinidad al nacimiento (SRB):
+
+$$\text{TGF} = \text{GRR}\cdot(1 + \text{SRB}) = \frac{\text{NRR}}{p(A)}\cdot(1 + \text{SRB})$$
+
+**Demostración del nivel de reemplazo.** Fijando $\text{NRR} = 1$ (reemplazo exacto), $\text{SRB} = 1.05$ y $p(A) \approx 0.98$:
+
+$$\text{GRR} = \frac{\text{NRR}}{p(A)} = \frac{1}{0.98}$$
+
+$$\text{TGF} = \frac{1}{0.98} \times (1 + 1.05) = \frac{2.05}{0.98} \approx \mathbf{2.09 \approx 2.1 \text{ hijos por mujer}}$$
+
+Una TNR igual a 1 nos quiere decir que el reemplazo exacto de una generación de mujeres por otra. Como nacen más hombres que mujeres (SRB = 1.05) y existe mortalidad femenina antes de alcanzar las edades reproductivas ($p(A) < 1$), se necesita una TGF $\approx 2.1$ hijos por mujer para garantizar ese reemplazo. Si la TGF \< 2.1, la generación de hijas es más pequeña que la de madres y la población tiende a disminuir a largo plazo (en ausencia de migración).
+
+### TGF, TBR y TNR para Chiapas (2010 y 2019)
+
+```{r fecundidad-calculos, echo=TRUE}
+# TEF Chiapas — CONAPO (2023). Indicadores demográficos por entidad federativa.
+# Grupos 15-19, 20-24, 25-29, 30-34, 35-39, 40-44, 45-49
+# Unidades: nacimientos por cada 1,000 mujeres
+tef_chis_2010 <- c(96.5, 151.0, 138.2, 91.0, 53.6, 17.1, 2.1)
+tef_chis_2019 <- c(73.8, 141.6, 137.8, 95.3, 53.8, 16.6, 1.9)
+
+# nLx femenino de las tablas de vida calculadas arriba
+# (grupos 15-19, 20-24, ..., 45-49 → filas 5 a 11 de la TV, índices 5:11)
+idx_fec <- which(edades_x %in% c(15,20,25,30,35,40,45))
+nLx_F_2010 <- tv_M_2010$nLx[idx_fec]
+nLx_F_2019 <- tv_M_2019$nLx[idx_fec]
+
+K <- 100 / 205   # proporción de nacimientos femeninos (SRB = 1.05)
+
+ind_2010 <- calcular_indicadores(tef_chis_2010, nLx_F_2010, K)
+ind_2019 <- calcular_indicadores(tef_chis_2019, nLx_F_2019, K)
+```
+
+```{r tabla-tef-detalle, echo=FALSE}
+grupos_fec <- c("15-19","20-24","25-29","30-34","35-39","40-44","45-49")
+
+tef_det <- data.frame(
+  Grupo  = grupos_fec,
+  TEF_2010 = tef_chis_2010,
+  TEF_2019 = tef_chis_2019,
+  nfx_2010 = round(tef_chis_2010/1000, 4),
+  nfx_2019 = round(tef_chis_2019/1000, 4)
+)
+
+exportar_csv(tef_det, "data/clean/tef_chiapas_2010_2019.csv")
+exportar_csv(tef_det, "output/tablas/tabla_tef_chiapas_2010_2019.csv")
+
+kable(tef_det,
+      caption = "Chiapas: Tasas Específicas de Fecundidad por grupo de edad",
+      col.names = c("Grupo de edad","TEF 2010","TEF 2019","$nf_x$ 2010","$nf_x$ 2019"),
+      booktabs = TRUE, digits = 4, escape = FALSE) |>
+  kable_styling(latex_options="hold_position", full_width=FALSE) |>
+  footnote(general="TEF en nacimientos por cada 1,000 mujeres. Fuente: CONAPO (2023).",
+           general_title="Nota:")
+```
+
+```{r tabla-tef-tnr-detalle, echo=FALSE}
+# Tabla detallada de cálculo de TNR para 2019
+tef_tnr_det <- data.frame(
+  Grupo   = grupos_fec,
+  nfx     = round(tef_chis_2019/1000, 5),
+  nfxF    = round(tef_chis_2019/1000*K, 5),
+  nLx_F   = round(nLx_F_2019, 1),
+  p0      = round(nLx_F_2019/(5*100000), 5),
+  producto= round(tef_chis_2019/1000*K*nLx_F_2019/(5*100000), 5)
+)
+kable(tef_tnr_det,
+      caption="Chiapas 2019: cálculo detallado de la TNR",
+      col.names=c("Grupo","$nf_x$","$nf_x^F$","$nL_x^F$",
+                  "$_{x+2.5}P_0(f)$","$nf_x^F\\cdot p_0$"),
+      booktabs=TRUE, digits=5, escape=FALSE) |>
+  kable_styling(latex_options=c("hold_position","scale_down"), font_size=9) |>
+  footnote(general=paste0("K = 100/205 = 0.4878. ",
+    "TNR = 5 × ",round(sum(tef_tnr_det$producto),5)," = ",
+    round(5*sum(tef_tnr_det$producto),4)),
+           general_title="Nota:")
+```
+
+```{r tabla-indicadores, echo=FALSE}
+res_fec <- data.frame(
+  Entidad = "Chiapas",
+  Año     = c("2010","2019"),
+  TGF     = round(c(ind_2010["TGF"], ind_2019["TGF"]), 3),
+  TBR     = round(c(ind_2010["TBR"], ind_2019["TBR"]), 3),
+  TNR     = round(c(ind_2010["TNR"], ind_2019["TNR"]), 3),
+  Interpretacion = c(
+    "TGF > 2.1: fecundidad sobre nivel de reemplazo",
+    "TGF > 2.1: sigue sobre reemplazo, en descenso"
+  )
+)
+
+exportar_csv(res_fec, "data/clean/tgf_tbr_tnr_chiapas.csv")
+exportar_csv(res_fec, "output/tablas/tabla_tgf_tbr_tnr_chiapas.csv")
+
+kable(res_fec,
+      caption = "Chiapas: TGF, TBR y TNR por año",
+      col.names = c("Entidad", "Año", "TGF (hijos/mujer)",
+                    "TBR (hijas/mujer)", "TNR (hijas/mujer)", "Interpretación"),
+      booktabs = TRUE, digits = 3,
+      align = c("l", "c", "r", "r", "r", "l")) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9) |>
+  column_spec(6, width = "5cm") |>
+  footnote(general = "K = 100/205 (SRB = 1.05). nLx de tablas de vida calculadas. Fuente: CONAPO (2023).",
+           general_title = "Nota:")
+```
+
+### Comparación de TEF en 2019: Chiapas, México y Chile
+
+```{r tef-comparativa, echo=TRUE, message=FALSE, warning=FALSE}
+# Descargar WPP2024 (con manejo de error de red)
+fec_wpp <- tryCatch(
+  fread(paste0("https://population.un.org/wpp/Download/Files/",
+               "1_Indicator%20(Standard)/CSV_FILES/",
+               "WPP2024_Fertility_by_Age5.csv.gz"),
+        showProgress = FALSE),
+  error = function(e) NULL
+)
+
+grupos_rep <- c(15, 20, 25, 30, 35, 40, 45)
+
+if (!is.null(fec_wpp)) {
+  fec_chl <- fec_wpp[Location == "Chile" & Variant == "Medium" &
+                       Time == 2019 & AgeGrpStart %in% grupos_rep,
+                     .(AgeGrpStart, tef = ASFR * 1000, entidad = "Chile (2019)")]
+  fec_mex <- fec_wpp[Location == "Mexico" & Variant == "Medium" &
+                       Time == 2019 & AgeGrpStart %in% grupos_rep,
+                     .(AgeGrpStart, tef = ASFR * 1000, entidad = "México (2019)")]
+} else {
+  # Valores de respaldo WPP2024 en caso de fallo de red
+  fec_chl <- data.table(
+    AgeGrpStart = grupos_rep,
+    tef  = c(27.2, 64.5, 79.3, 61.4, 31.2, 8.1, 0.6),
+    entidad = "Chile (2019)"
+  )
+  fec_mex <- data.table(
+    AgeGrpStart = grupos_rep,
+    tef  = c(62.1, 118.2, 106.5, 71.8, 36.2, 8.9, 0.8),
+    entidad = "México (2019)"
+  )
+  message("Red no disponible — usando valores WPP2024 de respaldo.")
+}
+
+fec_chis_dt <- data.table(
+  AgeGrpStart = grupos_rep,
+  tef         = tef_chis_2019,
+  entidad     = "Chiapas (2019)"
+)
+
+tef_2019_comp <- rbind(fec_chis_dt, fec_mex, fec_chl) |>
+  mutate(grupo_edad = factor(
+    paste0(AgeGrpStart, "-", AgeGrpStart + 4),
+    levels = paste0(grupos_rep, "-", grupos_rep + 4)
+  ))
+
+# Exportar
+exportar_csv(tef_2019_comp, "data/clean/tef_comparativa_2019.csv")
+exportar_csv(tef_2019_comp, "output/tablas/tabla_tef_comparativa_2019.csv")
+```
+
+```{r graf-tef, echo=FALSE, fig.height=4.5, fig.width=8, fig.cap="Tasas Específicas de Fecundidad por grupo de edad — Chiapas, México y Chile, 2019. Fuente: CONAPO (2023) para Chiapas; UNDESA WPP2024 para México y Chile."}
+p_tef <- ggplot(tef_2019_comp,
+       aes(x = grupo_edad, y = tef, group = entidad,
+           color = entidad, linetype = entidad)) +
+  geom_line(linewidth = 1.0) + geom_point(size = 2.8) +
+  scale_color_manual(
+    values = c("Chiapas (2019)" = "#e41a1c",
+               "México (2019)"  = "#377eb8",
+               "Chile (2019)"   = "#4daf4a"), name = NULL) +
+  scale_linetype_manual(
+    values = c("Chiapas (2019)" = "solid",
+               "México (2019)"  = "dashed",
+               "Chile (2019)"   = "dotdash"), name = NULL) +
+  scale_y_continuous(limits = c(0, 160), breaks = seq(0, 160, 25),
+                     name = "TEF (nacimientos por 1,000 mujeres)") +
+  labs(
+    title    = "Tasas Específicas de Fecundidad por edad, 2019",
+    subtitle = "Comparación: Chiapas, México y Chile",
+    x        = "Grupo de edad de la madre",
+    caption  = "Fuente: CONAPO (2023) para Chiapas; UNDESA WPP2024 para México y Chile."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position    = "bottom",
+        panel.grid.minor   = element_blank(),
+        plot.title         = element_text(face = "bold", size = 11))
+
+ggsave("output/figuras/tef_2019_chiapas_mexico_chile.png", p_tef,
+       width = 8, height = 4.5, dpi = 150)
+print(p_tef)
+```
+
+## Análisis final
+
+**Estructura poblacional.** La pirámide de 2026 muestra que Chiapas mantiene una estructura joven: la mayor concentración se da entre los 5 y 25 años, con leve superioridad masculina en edades menores y femenina a partir de los 30 años. Para 2070 la base se estrecha notablemente y el grueso de la población se desplazará hacia los 30–60 años, con implicaciones para los sistemas de pensiones y salud.
+
+**Tablas de vida y esperanza de vida.** Entre los años 2010 y 2019 la $e_0$ aumentó en ambos sexos, reflejo de mejoras en el acceso a servicios de salud y de la reducción de la mortalidad infantil. El COVID-19 produjo en 2021 el mayor retroceso registrado: la esperanza de vida masculina cayó varios años respecto a 2019, con un marcado incremento de las defunciones entre los 50 y 80 años.
+
+**Causa eliminada.** En este caso al eliminar los homicidios de las causas de muerte en 2019, la $e_0$ masculina aumenta y la femenina también, aunque en menor magnitud. La reducción en $nq_x$ masculina entre los 15 y 35 años es la más visible. Esto sugiere que, aunque el impacto agregado es modesto, la concentración en edades de formación y desarrollo hace que los homicidios sean una causa prioritaria desde la política pública.
+
+**Fecundidad y reproducción.** La TGF de Chiapas descendió entre 2010 y 2019. Ambos valores superan el umbral convencional de reemplazo de 2.1, indicando que la entidad sigue en una etapa intermedia de la transición demográfica. La caída más marcada ocurre en el grupo 15–19 años, consistente con mayor permanencia escolar y acceso a servicios de planificación familiar. La TNR superior a 1.0 en ambos años confirma que la población femenina de Chiapas sigue creciendo intergeneracionalmente.
+
+**Comparación internacional.** La gráfica de TEF ilustra tres etapas distintas de la transición: Chiapas presenta la curva más alta y temprana (pico en 20–24), México ocupa una posición intermedia, y Chile muestra el patrón más tardío y bajo (pico en 25–29, TGF bajo nivel de reemplazo). La fecundidad adolescente de Chiapas casi triplica a la de Chile, señalando que los avances en indicadores reproductivos de Chiapas dependen en gran medida de intervenciones en salud sexual y educación en los grupos de edad más jóvenes.
